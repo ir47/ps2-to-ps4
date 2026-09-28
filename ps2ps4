@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# ps2ps4 — batch-convert a PS2 disc image collection into PS4 fake PKGs
+# with ps2fpkg and stage them on a GoldHEN console over FTP.
+#
+# The conversion itself is done by spiral009's easy-ps2-fpkg (ps2fpkg):
+#   https://github.com/spiral009/easy-ps2-fpkg
+#
+# Run `ps2ps4 help` for usage. See README.md for setup.
+
+set -u -o pipefail
+
+# Resolve our real location, following symlinks (BSD readlink has no -f).
+resolve_root() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -L "$src" ]; do
+        dir=$(cd -P "$(dirname "$src")" && pwd)
+        src=$(readlink "$src")
+        case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+    done
+    cd -P "$(dirname "$src")" && pwd
+}
+PS2PS4_ROOT=$(resolve_root)
+
+for lib in common ftp appdb cmd_convert cmd_cleanup cmd_icons cmd_status; do
+    # shellcheck source=/dev/null
+    . "$PS2PS4_ROOT/lib/$lib.sh"
+done
+
+usage() {
+    cat <<EOF
+ps2ps4 $PS2PS4_VERSION — PS2 disc images → PS4 fake PKGs, staged over FTP
+
+Usage: ps2ps4 [options] <command> [command options]
+
+Commands:
+  convert     Convert unprocessed disc images and upload them to the PS4's
+              staging folder (then install them with Package Installer)
+  cleanup     Delete staged PKGs that are now installed, to free space
+  icons       Retrofit cover-art icons onto installed PS2 games
+  status      Show collection progress and what's staged on the PS4
+  doctor      Check dependencies, configuration and PS4 connectivity
+  help        Show this help
+
+Global options:
+  -c, --config FILE   Config file (default: \$PS2PS4_CONFIG, ./config.sh,
+                      or ~/.config/ps2ps4/config.sh)
+  -n, --dry-run       Show what would happen without changing anything
+  -q, --quiet         Only print warnings, errors and the final summary
+  -v, --verbose       Print debug detail
+      --log-file FILE Write the run log here (default: STATE_DIR/logs/)
+      --no-color      Disable coloured output (NO_COLOR is also honoured)
+  -h, --help          Show this help
+  -V, --version       Show version
+
+convert options:
+      --limit N       Process at most N disc images this run
+      --shuffle       Process in random order instead of alphabetical
+      --no-prefetch   Don't copy the next image while converting this one
+      --no-sync       Don't mark games already installed on the PS4 as done
+      --local DIR     Save PKGs to DIR instead of uploading (e.g. for USB)
+
+icons options:
+      --only ID       Only update one title (e.g. SCUS-97105)
+      --force         Re-download art even if it's cached
+
+Conversion is done by ps2fpkg from spiral009's easy-ps2-fpkg:
+  https://github.com/spiral009/easy-ps2-fpkg
+
+Exit codes: 0 success, 1 some items failed, 2 usage/config error,
+            3 PS4 unreachable, 130 interrupted.
+EOF
+}
+
+main() {
+    set_defaults
+
+    CLI_CONFIG="" CLI_COLOR=auto CLI_LIMIT="" CLI_ORDER="" CLI_PREFETCH=""
+    CLI_NO_SYNC=0 CLI_ONLY="" CLI_FORCE=0 LOCAL_OUTPUT_DIR="" DRY_RUN=0
+    local command="" cli_verbosity=""
+
+    need_arg() {
+        if [ $# -lt 2 ] || [ -z "$2" ]; then
+            usage >&2
+            die "$1 requires a value" 2
+        fi
+    }
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--config) need_arg "$@"; CLI_CONFIG="$2"; shift ;;
+            --config=*) CLI_CONFIG="${1#*=}" ;;
+            -n|--dry-run) DRY_RUN=1 ;;
+            -q|--quiet) cli_verbosity=0 ;;
+            -v|--verbose) cli_verbosity=2 ;;
+            --log-file) need_arg "$@"; LOG_FILE="$2"; shift ;;
+            --no-color) CLI_COLOR=never ;;
+            --limit) need_arg "$@"; CLI_LIMIT="$2"; shift ;;
+            --shuffle) CLI_ORDER=shuffle ;;
+            --no-prefetch) CLI_PREFETCH=0 ;;
+            --no-sync) CLI_NO_SYNC=1 ;;
+            --local) need_arg "$@"; LOCAL_OUTPUT_DIR="$2"; shift ;;
+            --only) need_arg "$@"; CLI_ONLY="$2"; shift ;;
+            --force) CLI_FORCE=1 ;;
+            -h|--help) usage; exit 0 ;;
+            -V|--version) echo "ps2ps4 $PS2PS4_VERSION"; exit 0 ;;
+            -*) usage >&2; die "Unknown option: $1" 2 ;;
+            *)
+                [ -z "$command" ] || { usage >&2; die "Unexpected argument: $1" 2; }
+                command="$1"
+                ;;
+        esac
+        shift
+    done
+
+    setup_colors
+    load_config
+
+    # Command-line flags beat the config file.
+    [ -n "$cli_verbosity" ] && VERBOSITY=$cli_verbosity
+    [ -n "$CLI_ORDER" ] && ORDER=$CLI_ORDER
+    [ -n "$CLI_PREFETCH" ] && PREFETCH=$CLI_PREFETCH
+    case "$CLI_LIMIT" in
+        ''|*[!0-9]*) [ -z "$CLI_LIMIT" ] || die "--limit needs a positive number" 2 ;;
+    esac
+    [ "$CLI_LIMIT" = "0" ] && die "--limit needs a positive number" 2
+    if [ -n "$CLI_ONLY" ]; then
+        disc_id_from_name "$CLI_ONLY" || die "--only expects a disc ID like SCUS-97105" 2
+        CLI_ONLY=$REPLY
+    fi
+
+    install_traps
+
+    case "$command" in
+        convert) cmd_convert ;;
+        cleanup) cmd_cleanup ;;
+        icons) cmd_icons ;;
+        status) cmd_status ;;
+        doctor) cmd_doctor ;;
+        help|"") usage ;;
+        *) usage >&2; die "Unknown command: $command" 2 ;;
+    esac
+}
+
+main "$@"

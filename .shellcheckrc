@@ -1,0 +1,7 @@
+# Config and state are globals shared between sourced files, which
+# ShellCheck can't follow, so "appears unused" is noise here.
+disable=SC2034
+# `doctor` passes check expressions as single-quoted strings to eval on purpose.
+disable=SC2016
+# Globals defined in common.sh look like typos from other files.
+disable=SC2153

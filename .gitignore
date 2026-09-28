@@ -1,0 +1,11 @@
+# Personal configuration
+config.sh
+
+# Never commit converter binaries, disc images or packages
+ps2fpkg*
+!tests/fixtures/fake_ps2fpkg.sh
+*.iso
+*.pkg
+*.db
+
+.DS_Store
