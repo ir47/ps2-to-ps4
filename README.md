@@ -1,5 +1,7 @@
 # ps2-to-ps4
 
+[![CI](https://github.com/ir47/ps2-to-ps4/actions/workflows/ci.yml/badge.svg)](https://github.com/ir47/ps2-to-ps4/actions/workflows/ci.yml)
+
 Batch-convert a PS2 disc image collection into PS4 fake PKGs and stage them
 on a jailbroken console over FTP — unattended, resumable, and safe to re-run.
 
@@ -209,6 +211,9 @@ and empty arrays are expanded as `${a[@]+"${a[@]}"}` under `set -u`. Lint with
 ```bash
 shellcheck -x ps2ps4 lib/*.sh tests/run.sh
 ```
+
+CI runs ShellCheck and the tests on macOS and Linux for every push and pull
+request.
 
 ## Credits
 
