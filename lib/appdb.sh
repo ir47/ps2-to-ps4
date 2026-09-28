@@ -44,9 +44,27 @@ appdb_installed_title_ids() {
     done <<<"$tables" | sort -u
 }
 
+# appdb_unfinished_installs DB — installs that started but haven't completed
+# (contentStatus = 1), oldest first, as "titleId<TAB>name<TAB>started<TAB>hours".
+# Age is measured against the newest mTime in the registry, i.e. the PS4's
+# own clock at its last activity, so a wrong console clock doesn't matter.
+appdb_unfinished_installs() {
+    local db="$1" tables table
+    tables=$(appdb_tables "$db") || return 1
+    while IFS= read -r table; do
+        [ -n "$table" ] || continue
+        sqlite3 -separator $'\t' "$db" "
+            SELECT titleId, titleName, substr(installDate, 1, 16),
+                   ROUND((julianday(ref) - julianday(installDate)) * 24, 1)
+            FROM \"$table\", (SELECT max(mTime) AS ref FROM \"$table\")
+            WHERE contentStatus = 1 AND titleId IS NOT NULL;"
+    done <<<"$tables" | sort -t$'\t' -k3,3 | awk -F'\t' '!seen[$1]++'
+}
+
 # appdb_load_installed — fetch app.db and set:
 #   INSTALLED_SET / INSTALLED_COUNT  titles in the registry (installed or installing)
 #   FINISHED_SET  / FINISHED_COUNT   titles whose install has completed
+#   INSTALLING_COUNT                 installs queued or in progress
 # Returns 1 if the registry is unavailable.
 appdb_load_installed() {
     local db="$RUN_TMP/app.db" ids
@@ -59,4 +77,7 @@ appdb_load_installed() {
     ids=$(appdb_installed_title_ids "$db" finished) || return 1
     FINISHED_SET="$ids"
     FINISHED_COUNT=$(printf '%s\n' "$ids" | grep -c .)
+    # Not INSTALLED_COUNT - FINISHED_COUNT: built-in and disc-based apps
+    # have no recorded size, so they're neither "finished" nor installing.
+    INSTALLING_COUNT=$(appdb_unfinished_installs "$db" | grep -c .)
 }

@@ -95,6 +95,16 @@ if command -v sqlite3 >/dev/null 2>&1; then
         "$(appdb_installed_title_ids "$TMP/app.db")"
     assert_eq "finished excludes installs in progress" "CUSA00219${NL}SCUS97105${NL}SLUS20062" \
         "$(appdb_installed_title_ids "$TMP/app.db" finished)"
+    sqlite3 "$TMP/queue.db" "
+        CREATE TABLE tbl_appbrowse_1234567890 (titleId TEXT, titleName TEXT, contentStatus INT,
+            contentSize INT, installDate DATETIME, mTime DATETIME);
+        INSERT INTO tbl_appbrowse_1234567890 VALUES
+            ('SLUS20001', 'Done Game',   0, 5000, '2026-09-28 09:00:00.000', '2026-09-28 09:05:00.000'),
+            ('SCUS97571', 'Stuck Game',  1, 0,    '2026-09-24 20:00:00.000', '2026-09-24 20:00:00.000'),
+            ('SLUS20002', 'Queued Game', 1, 0,    '2026-09-28 11:00:00.000', '2026-09-28 12:00:00.000');"
+    assert_eq "unfinished installs, oldest first, aged by PS4 clock" \
+        "SCUS97571	Stuck Game	2026-09-24 20:00	88.0${NL}SLUS20002	Queued Game	2026-09-28 11:00	1.0" \
+        "$(appdb_unfinished_installs "$TMP/queue.db")"
     sqlite3 "$TMP/empty.db" "CREATE TABLE t (x);"
     assert_false "no appbrowse table" appdb_installed_title_ids "$TMP/empty.db" 2>/dev/null
 else
@@ -145,6 +155,27 @@ assert_eq "retry of failed game goes last" "SLUS-20001" "$(tail -n 1 "$state/com
 
 run status
 assert_true "status shows remaining" grep -q "remaining     : 1" "$TMP/stdout"
+
+echo "convert without working ahead (--no-prefetch)"
+rm -rf "$state" "$out"
+run convert --local "$out" --no-prefetch
+pkgs=("$out"/*.pkg)
+assert_eq "same PKGs as with prefetch" "4" "${#pkgs[@]}"
+assert_eq "same failure" "SLES-12345 BROKEN	convert" "$(cut -f2,3 "$state/failed.tsv")"
+
+echo "interrupting a run with a background conversion in progress"
+rm -rf "$state" "$out" "$TMP/work"
+FAKE_PS2FPKG_SLEEP=2 "$ROOT/ps2ps4" --config "$TMP/config.sh" --no-color convert --local "$out" \
+    >"$TMP/stdout" 2>"$TMP/stderr" &
+pid=$!
+sleep 3 # first game done, second converting in the background
+kill -TERM "$pid"
+wait "$pid"
+assert_eq "exits as interrupted" "130" "$?"
+sleep 1
+assert_false "no converter left running" pgrep -f "$FIXTURES/fake_ps2fpkg.sh"
+assert_eq "no job folders left" "" "$(ls "$TMP/work" 2>/dev/null)"
+assert_false "lock released" test -e "$state/convert.lock"
 
 echo
 echo "$PASS passed, $FAIL failed"

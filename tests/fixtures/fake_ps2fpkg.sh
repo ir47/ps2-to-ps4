@@ -12,6 +12,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 echo "fake ps2fpkg: $iso title=$title" >>"${FAKE_PS2FPKG_LOG:-/dev/null}"
+[ -n "${FAKE_PS2FPKG_SLEEP:-}" ] && sleep "$FAKE_PS2FPKG_SLEEP"
 case "$iso" in
     *BROKEN*) echo "error: unsupported disc image" >&2; exit 1 ;;
 esac

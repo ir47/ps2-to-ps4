@@ -53,9 +53,36 @@ cmd_status() {
             tid=$(title_id_from_pkg_name "$name") || continue
             set_has "$FINISHED_SET" "$tid" && cleanable=$((cleanable + 1))
         done <<<"$listing"
-        say "  installed apps: $FINISHED_COUNT ($((INSTALLED_COUNT - FINISHED_COUNT)) still installing)"
+        say "  installed apps: $FINISHED_COUNT"
         say "  cleanable     : $cleanable staged PKG(s) already installed (run: ps2ps4 cleanup)"
+        report_unfinished_installs
     fi
+}
+
+# stuck_installs — unfinished installs older than STUCK_INSTALL_HOURS, from
+# the app.db fetched by appdb_load_installed.
+stuck_installs() {
+    appdb_unfinished_installs "$RUN_TMP/app.db" 2>/dev/null |
+        awk -F'\t' -v h="$STUCK_INSTALL_HOURS" '$4 >= h'
+}
+
+report_unfinished_installs() {
+    local all stuck total nstuck
+    all=$(appdb_unfinished_installs "$RUN_TMP/app.db" 2>/dev/null)
+    total=$(printf '%s\n' "$all" | grep -c .)
+    [ "$total" -gt 0 ] || return 0
+    stuck=$(stuck_installs)
+    nstuck=$(printf '%s\n' "$stuck" | grep -c .)
+    if [ "$nstuck" -eq 0 ]; then
+        say "  installing    : $total (queued or in progress)"
+        return 0
+    fi
+    say "  installing    : $total, of which $nstuck unfinished for ${STUCK_INSTALL_HOURS}h+ (possibly stuck):"
+    printf '%s\n' "$stuck" | awk -F'\t' '{
+        age = ($4 < 48) ? sprintf("%.0fh", $4) : sprintf("%.1f days", $4 / 24)
+        printf "    %-9s  %-44.44s started %s (%s ago)\n", $1, $2, $3, age
+    }'
+    say "  If the PS4 has finished its install queue, reinstall these from Package Installer."
 }
 
 cmd_doctor() {
