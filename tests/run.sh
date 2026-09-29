@@ -105,6 +105,19 @@ if command -v sqlite3 >/dev/null 2>&1; then
     assert_eq "unfinished installs, oldest first, aged by PS4 clock" \
         "SCUS97571	Stuck Game	2026-09-24 20:00	88.0${NL}SLUS20002	Queued Game	2026-09-28 11:00	1.0" \
         "$(appdb_unfinished_installs "$TMP/queue.db")"
+    # appdb_load_installed normally downloads app.db from the PS4; stub that.
+    load_registry() { # DB — prints "finished/installing" counts, fails like the real thing
+        (
+            RUN_TMP="$TMP/rt" && mkdir -p "$RUN_TMP"
+            # shellcheck disable=SC2317  # called indirectly by appdb_load_installed
+            appdb_fetch() { cp "$REGISTRY" "$1"; }
+            REGISTRY="$1" appdb_load_installed && echo "$FINISHED_COUNT/$INSTALLING_COUNT"
+        )
+    }
+    cp "$TMP/queue.db" "$TMP/idle.db"
+    sqlite3 "$TMP/idle.db" "DELETE FROM tbl_appbrowse_1234567890 WHERE contentStatus = 1;"
+    assert_eq "registry loads with installs in progress" "1/2" "$(load_registry "$TMP/queue.db")"
+    assert_eq "registry loads with nothing installing" "1/0" "$(load_registry "$TMP/idle.db")"
     sqlite3 "$TMP/empty.db" "CREATE TABLE t (x);"
     assert_false "no appbrowse table" appdb_installed_title_ids "$TMP/empty.db" 2>/dev/null
 else

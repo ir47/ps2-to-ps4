@@ -80,4 +80,6 @@ appdb_load_installed() {
     # Not INSTALLED_COUNT - FINISHED_COUNT: built-in and disc-based apps
     # have no recorded size, so they're neither "finished" nor installing.
     INSTALLING_COUNT=$(appdb_unfinished_installs "$db" | grep -c .)
+    # grep -c exits 1 when it counts zero; that mustn't read as a failure.
+    return 0
 }
