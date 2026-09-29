@@ -12,7 +12,7 @@ cmd_cleanup() {
 
     log_step "Reading the PS4 app registry"
     appdb_load_installed || die "Can't determine installed apps; nothing deleted"
-    log_info "$FINISHED_COUNT installed apps, $((INSTALLED_COUNT - FINISHED_COUNT)) still installing"
+    log_info "$FINISHED_COUNT installed apps, $INSTALLING_COUNT installing"
 
     log_step "Listing $PS4_PKG_DIR"
     local listing rc
@@ -82,6 +82,10 @@ cmd_cleanup() {
     fi
     say "Not installed   : $kept"
     [ "$installing" -gt 0 ] && say "Still installing: $installing (run cleanup again once they finish)"
+    local nstuck
+    nstuck=$(stuck_installs | grep -c .)
+    [ "$nstuck" -gt 0 ] &&
+        say "Possibly stuck  : $nstuck install(s) unfinished for ${STUCK_INSTALL_HOURS}h+ (see: ps2ps4 status)"
     [ "$unknown" -gt 0 ] && say "Unrecognised    : $unknown"
     [ "$failed" -gt 0 ] && say "Delete failed   : $failed"
     [ "$failed" -eq 0 ]
