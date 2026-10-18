@@ -65,7 +65,8 @@ PS4_IP="192.168.0.50"
 # Batch behaviour
 # ---------------------------------------------------------------------------
 
-# Copy the next disc image while the current one converts/uploads (1 = on).
+# Copy and convert the next game while the current one uploads (1 = on).
+# Needs local space for two games' disc images and PKGs at once.
 # PREFETCH=1
 
 # "sorted" (alphabetical) or "shuffle".
@@ -78,6 +79,10 @@ PS4_IP="192.168.0.50"
 # (usually means the PS4 went to sleep or lost its jailbreak).
 # MAX_NETWORK_FAILURES=3
 
+# `status` and `cleanup` flag installs that have been unfinished for longer
+# than this as possibly stuck. Raise it if you queue very long install batches.
+# STUCK_INSTALL_HOURS=6
+
 # ---------------------------------------------------------------------------
 # Local paths
 # ---------------------------------------------------------------------------
@@ -88,7 +93,7 @@ PS4_IP="192.168.0.50"
 # FAILED_LOG="$STATE_DIR/failed.tsv"
 # LOG_DIR="$STATE_DIR/logs"
 
-# Scratch space for the local ISO copy and built PKG. Needs roughly 3x the
+# Scratch space for the local ISO copies and built PKGs. Needs roughly 4x the
 # size of your largest disc image free. Use a local SSD, not the NAS.
 # WORK_DIR="$HOME/tmp/ps2ps4-work"
 

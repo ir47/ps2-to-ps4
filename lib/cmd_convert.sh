@@ -15,7 +15,7 @@ C_ATTEMPTED=0
 
 STOP_REASON=""
 NET_FAILS=0
-PREFETCH_PID="" PREFETCH_IDX=""
+BG_PID="" BG_IDX=""
 COPY_PID=""
 
 cmd_convert() {
@@ -111,9 +111,9 @@ release_lock() { rm -rf "$LOCK_DIR"; }
 
 convert_cleanup() {
     [ -n "$COPY_PID" ] && kill "$COPY_PID" 2>/dev/null
-    [ -n "$PREFETCH_PID" ] && kill "$PREFETCH_PID" 2>/dev/null
+    stop_background_job
     wait 2>/dev/null
-    rm -rf "$WORK_DIR/in" "$WORK_DIR/out"
+    rm -rf "$WORK_DIR"/job-*
 }
 
 # Use TITLE_DB if present, else download it once. Without it, ps2fpkg
@@ -249,48 +249,64 @@ process_worklist() {
     for pos in "${!WORK[@]}"; do
         C_ATTEMPTED=$((C_ATTEMPTED + 1))
         process_one "$upload" "$pos" "$total"
-        rm -rf "$WORK_DIR/out"
         [ -n "$STOP_REASON" ] && break
     done
+    stop_background_job
 }
 
+# Each game is "prepared" (copied locally, then converted) in its own job
+# directory, WORK_DIR/job-<index>. While game N uploads, game N+1 is
+# prepared in the background, so a game's copy and conversion overlap the
+# previous game's upload. Only one ps2fpkg runs at a time.
 process_one() {
     local upload="$1" pos="$2" total="$3"
     local idx=${WORK[pos]}
     local key=${ITEM_KEY[idx]} disc=${ITEM_DISC[idx]} src=${ITEM_PATH[idx]}
-    local title local_iso pkg
+    local title status kind pkg
 
     title=$(lookup_title "$disc")
     echo_game_header "$((pos + 1))" "$total" "$key" "$disc" "$title"
 
-    check_local_space "$pos" || return 1
-    # Estimate with the ISO size before spending time on copy + convert.
-    if [ "$upload" -eq 1 ] && [ "${STAGING_LIMIT_GB:-0}" -gt 0 ]; then
-        staging_has_room "$(ftp_list_files "$PS4_PKG_DIR")" "$(file_size "$src")" || return 1
+    if [ "$BG_IDX" != "$idx" ]; then
+        check_local_space "$pos" || return 1
+        # Estimate with the ISO size before spending time on copy + convert.
+        if [ "$upload" -eq 1 ] && [ "${STAGING_LIMIT_GB:-0}" -gt 0 ]; then
+            staging_has_room "$(ftp_list_files "$PS4_PKG_DIR")" "$(file_size "$src")" || return 1
+        fi
+        prepare_job "$idx" "$title" fg
+    else
+        collect_background_job
     fi
 
-    local_iso=$(local_copy_path "$idx")
-    if ! acquire_local_copy "$idx"; then
-        record_failure "$key" copy "copy from $src failed"
-        return 1
-    fi
-    # Overlap the next game's copy with this game's convert + upload.
+    status=$(cat "$(job_dir "$idx")/status" 2>/dev/null)
+    # Start on the next game before this one's upload ties up the foreground.
     if [ "$PREFETCH" = 1 ] && [ $((pos + 1)) -lt "$total" ]; then
-        start_prefetch "${WORK[pos + 1]}"
+        start_background_job "$((pos + 1))" "$total"
     fi
 
-    if ! pkg=$(convert_to_pkg "$local_iso" "$title"); then
-        record_failure "$key" convert "Conversion failed"
-        rm -f "$local_iso"
-        return 1
-    fi
-    rm -f "$local_iso"
+    case "$status" in
+        ok$'\t'*) pkg=${status#ok$'\t'} ;;
+        fail$'\t'*)
+            kind=${status#fail$'\t'}
+            record_failure "$key" "${kind%%$'\t'*}" "${kind#*$'\t'}"
+            rm -rf "$(job_dir "$idx")"
+            return 1
+            ;;
+        *)
+            record_failure "$key" convert "Preparation was interrupted"
+            rm -rf "$(job_dir "$idx")"
+            return 1
+            ;;
+    esac
 
     if [ "$upload" -eq 1 ]; then
-        deliver_ftp "$pkg" "$key" || return 1
+        deliver_ftp "$pkg" "$key"
     else
-        deliver_local "$pkg" "$key" || return 1
+        deliver_local "$pkg" "$key"
     fi
+    local rc=$?
+    rm -rf "$(job_dir "$idx")"
+    return "$rc"
 }
 
 echo_game_header() {
@@ -321,53 +337,115 @@ record_failure() {
     esac
 }
 
-# Need room for this ISO, its PKG (roughly the same size) and a prefetched ISO.
-check_local_space() {
+# local_space_shortfall POS — prints "need<TAB>free" and returns 0 if there
+# isn't room for this game's ISO and PKG (roughly the same size) plus, when
+# working ahead, the next game's ISO and PKG. Has no side effects.
+local_space_shortfall() {
     local pos="$1" idx need free next
     idx=${WORK[pos]}
     need=$(($(file_size "${ITEM_PATH[idx]}") * 2))
-    # A prefetched copy of this ISO is already taking up its share.
-    [ "$PREFETCH_IDX" = "$idx" ] && need=$((need - $(file_size "${ITEM_PATH[idx]}")))
     if [ "$PREFETCH" = 1 ] && [ $((pos + 1)) -lt "${#WORK[@]}" ]; then
         next=${WORK[pos + 1]}
-        need=$((need + $(file_size "${ITEM_PATH[next]}")))
+        need=$((need + $(file_size "${ITEM_PATH[next]}") * 2))
     fi
     free=$(free_bytes "$WORK_DIR")
-    if [ -n "$free" ] && [ "$free" -lt "$need" ]; then
-        STOP_REASON="not enough local space in $WORK_DIR (need $(human_size "$need"), have $(human_size "$free"))"
-        C_ATTEMPTED=$((C_ATTEMPTED - 1))
-        log_error "$STOP_REASON"
-        return 1
-    fi
+    [ -n "$free" ] && [ "$free" -lt "$need" ] || return 1
+    printf '%s\t%s\n' "$need" "$free"
+}
+
+check_local_space() {
+    local short
+    short=$(local_space_shortfall "$1") || return 0
+    STOP_REASON="not enough local space in $WORK_DIR (need $(human_size "${short%%$'\t'*}"), have $(human_size "${short#*$'\t'}"))"
+    C_ATTEMPTED=$((C_ATTEMPTED - 1))
+    log_error "$STOP_REASON"
+    return 1
 }
 
 # --------------------------------------------------------------------------
-# Copying (with optional background prefetch of the next game)
+# Preparing a game: copy + convert, in the foreground or background
 # --------------------------------------------------------------------------
 
-local_copy_path() { printf '%s/in/%s\n' "$WORK_DIR" "${ITEM_PATH[$1]##*/}"; }
+job_dir() { printf '%s/job-%s\n' "$WORK_DIR" "$1"; }
 
-acquire_local_copy() {
-    local idx="$1" src=${ITEM_PATH[$1]} dst rc
-    dst=$(local_copy_path "$idx")
-    mkdir -p "$WORK_DIR/in"
+# prepare_job IDX TITLE fg|bg — copy the disc image into the job directory
+# and convert it. Writes the outcome to <job>/status as one of:
+#   ok<TAB>/path/to.pkg
+#   fail<TAB>copy|convert<TAB>detail
+prepare_job() {
+    local idx="$1" title="$2" mode="$3" dir src iso pkg
+    dir=$(job_dir "$idx")
+    src=${ITEM_PATH[idx]}
+    iso="$dir/${src##*/}"
+    rm -rf "$dir"
+    mkdir -p "$dir"
 
-    if [ -n "$PREFETCH_PID" ] && [ "$PREFETCH_IDX" = "$idx" ]; then
-        if kill -0 "$PREFETCH_PID" 2>/dev/null; then
-            log_info "Waiting for background copy to finish..."
-        fi
-        wait "$PREFETCH_PID"
-        rc=$?
-        PREFETCH_PID="" PREFETCH_IDX=""
-        if [ "$rc" -eq 0 ] && mv "$dst.part" "$dst"; then
-            log_debug "Using prefetched copy"
-            return 0
-        fi
-        rm -f "$dst.part"
-        log_warn "Background copy failed; retrying in the foreground"
+    if [ "$mode" = fg ]; then
+        copy_with_progress "$src" "$iso"
+    else
+        log_debug "Copying ${src##*/} in the background"
+        cp "$src" "$iso"
+    fi || {
+        printf 'fail\tcopy\tcopy from %s failed\n' "$src" >"$dir/status"
+        return 1
+    }
+
+    if ! pkg=$(convert_to_pkg "$iso" "$title" "$dir/out" "$dir/ps2fpkg.log"); then
+        printf 'fail\tconvert\tConversion failed\n' >"$dir/status"
+        rm -f "$iso"
+        return 1
     fi
+    rm -f "$iso"
+    printf 'ok\t%s\n' "$pkg" >"$dir/status"
+}
 
-    copy_with_progress "$src" "$dst"
+# Prepare WORK[POS] in the background, with its output going to its job log.
+start_background_job() {
+    local pos="$1" total="$2" idx title
+    idx=${WORK[pos]}
+    # Not enough room to work ahead: the game is prepared in the foreground
+    # when its turn comes, where the space check stops the run cleanly.
+    local_space_shortfall "$pos" >/dev/null && return 0
+    title=$(lookup_title "${ITEM_DISC[idx]}")
+    mkdir -p "$(job_dir "$idx")"
+    (prepare_job "$idx" "$title" bg) >"$(job_dir "$idx").log" 2>&1 &
+    BG_PID=$!
+    BG_IDX=$idx
+}
+
+collect_background_job() {
+    if kill -0 "$BG_PID" 2>/dev/null; then
+        log_info "Waiting for background copy + conversion to finish..."
+    fi
+    wait "$BG_PID"
+    local log
+    log="$(job_dir "$BG_IDX").log"
+    # Surface ps2fpkg's error output, which the background job captured.
+    if ! grep -q '^ok' "$(job_dir "$BG_IDX")/status" 2>/dev/null && [ -s "$log" ]; then
+        grep -v '^ *·' "$log" >&2
+    fi
+    rm -f "$log"
+    BG_PID="" BG_IDX=""
+}
+
+# kill_tree PID — kill a process and all of its descendants. ps2fpkg runs
+# a few subshells deep inside a background job, so killing the job's own
+# PID alone would leave it running.
+kill_tree() {
+    local child
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill -TERM "$1" 2>/dev/null
+}
+
+# Stop a background job and anything it started (cp, ps2fpkg).
+stop_background_job() {
+    [ -n "$BG_PID" ] || return 0
+    kill_tree "$BG_PID"
+    wait "$BG_PID" 2>/dev/null
+    rm -rf "$(job_dir "$BG_IDX")" "$(job_dir "$BG_IDX").log"
+    BG_PID="" BG_IDX=""
 }
 
 copy_with_progress() {
@@ -394,23 +472,13 @@ copy_with_progress() {
     mv "$dst.part" "$dst"
 }
 
-start_prefetch() {
-    local idx="$1" dst
-    dst=$(local_copy_path "$idx")
-    mkdir -p "$WORK_DIR/in"
-    log_debug "Prefetching ${ITEM_PATH[idx]##*/} in the background"
-    cp "${ITEM_PATH[idx]}" "$dst.part" 2>/dev/null &
-    PREFETCH_PID=$!
-    PREFETCH_IDX=$idx
-}
-
 # --------------------------------------------------------------------------
 # Conversion
 # --------------------------------------------------------------------------
 
-# convert_to_pkg ISO TITLE — prints the path of the built PKG.
+# convert_to_pkg ISO TITLE OUT_DIR LOG — prints the path of the built PKG.
 convert_to_pkg() {
-    local iso="$1" title="$2" out="$WORK_DIR/out" log="$RUN_TMP/ps2fpkg.log" pkg
+    local iso="$1" title="$2" out="$3" log="$4" pkg
     local args=("$iso" -o "$out")
     [ -n "$title" ] && args+=(-t "$title")
     [ "$AUTO_ART" = 1 ] && args+=(--auto-art)
@@ -421,8 +489,8 @@ convert_to_pkg() {
     log_info "Converting to PKG$([ "$AUTO_ART" = 1 ] && echo ' (with cover art)')..." >&2
     log_debug "ps2fpkg ${args[*]}" >&2
 
-    # Run from WORK_DIR so any scratch files ps2fpkg creates stay there.
-    if ! (cd "$WORK_DIR" && "$PS2FPKG_BIN" "${args[@]}") >"$log" 2>&1; then
+    # Run from the job directory so any scratch files ps2fpkg creates stay there.
+    if ! (cd "$(dirname "$out")" && "$PS2FPKG_BIN" "${args[@]}") >"$log" 2>&1; then
         log_error "ps2fpkg output (last 10 lines):"
         tail -n 10 "$log" | sed 's/^/      /' >&2
         [ -n "$LOG_FILE" ] && sed 's/^/      ps2fpkg: /' "$log" >>"$LOG_FILE"

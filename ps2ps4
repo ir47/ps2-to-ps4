@@ -56,7 +56,7 @@ Global options:
 convert options:
       --limit N       Process at most N disc images this run
       --shuffle       Process in random order instead of alphabetical
-      --no-prefetch   Don't copy the next image while converting this one
+      --no-prefetch   Don't prepare the next game while this one uploads
       --no-sync       Don't mark games already installed on the PS4 as done
       --local DIR     Save PKGs to DIR instead of uploading (e.g. for USB)
 

@@ -27,12 +27,12 @@ collection:
 
 - **Idempotent batches** — remembers what's done, and reads the PS4's own app
   registry so games installed any other way are skipped too.
-- **Pipelined** — copies the next disc image from your NAS while the current
-  one converts and uploads.
+- **Pipelined** — copies and converts the next game while the current one
+  uploads, so the upload link is rarely idle.
 - **Verified uploads** — checks the staged file's size on the console, removes
   partial uploads, and stops cleanly when the PS4's disk fills up.
-- **Cleanup** — deletes staged PKGs once they're installed, to make room for
-  the next batch.
+- **Install-aware cleanup** — deletes staged PKGs once their install has
+  *finished* (never mid-install), and flags installs that look stuck.
 - **Failure tracking** — failures are logged by type (copy, convert, upload,
   verify, disk full); games that failed before are retried *after* new ones.
 - **Icons** — retrofits box-art icons onto PS2 games installed without them.
@@ -147,6 +147,13 @@ Every command accepts `--dry-run`, `--quiet`, `--verbose` and
 the disc image. Set `STAGING_LIMIT_GB` so `convert` stops before the drive
 fills, rather than hitting "disk full" partway through an upload.
 
+`cleanup` is safe to run while games are installing. A game appears in the
+PS4's registry as soon as its install *starts*, so `cleanup` only deletes a
+PKG once the registry shows the install completed. `status` and `cleanup` also
+flag installs that have been unfinished for longer than `STUCK_INSTALL_HOURS`
+(default 6). If the PS4 has finished its install queue, reinstall those from
+Package Installer.
+
 ### Useful variations
 
 ```bash
@@ -181,7 +188,7 @@ All state lives in `STATE_DIR` (default `~/.local/state/ps2ps4`):
 | `icons/` | Cover art cache for `ps2ps4 icons` |
 
 Scratch files go in `WORK_DIR` and are removed after each game, and on
-Ctrl+C. It needs about three times your largest disc image in free space.
+Ctrl+C. It needs about four times your largest disc image in free space (two games in flight, each with its disc image and PKG).
 Put it on a local SSD rather than the NAS.
 
 ## Known issues
